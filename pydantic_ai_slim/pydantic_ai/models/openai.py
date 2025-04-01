@@ -403,19 +403,18 @@ class OpenAIModel(Model):
         model_request_parameters: ModelRequestParameters,
         tools: list[chat.ChatCompletionToolParam],
     ) -> ChatCompletionToolChoiceOptionParam | None:
-        """Determine the `tool_choice` setting for the model."""
-        tool_choice = model_settings.get('tool_choice', 'auto')
-
-        if tool_choice == 'auto' and tools and not model_request_parameters.allow_text_result:
-            return 'required'
-        elif tool_choice == 'auto':
-            return 'auto'
-        elif tool_choice in ('none', 'required'):
+        """Determine the `tool_choice` setting for the model.
+        
+        If tool_choice is explicitly set in model_settings, respect that setting.
+        Otherwise, default to 'auto' to let the model decide whether to use tools.
+        """
+        if 'tool_choice' in model_settings:
+            tool_choice = model_settings['tool_choice']
+            if isinstance(tool_choice, ForcedFunctionToolChoice):
+                return {'type': 'function', 'function': {'name': tool_choice.name}}
             return tool_choice
-        elif isinstance(tool_choice, ForcedFunctionToolChoice):
-            return {'type': 'function', 'function': {'name': tool_choice.name}}
-        else:
-            assert_never(tool_choice)
+
+        return 'auto'
 
 
 @dataclass(init=False)
@@ -590,19 +589,18 @@ class OpenAIResponsesModel(Model):
         model_request_parameters: ModelRequestParameters,
         tools: list[responses.FunctionToolParam],
     ) -> ChatCompletionToolChoiceOptionParam | None:
-        """Determine the `tool_choice` setting for the model."""
-        tool_choice = model_settings.get('tool_choice', 'auto')
-
-        if tool_choice == 'auto' and tools and not model_request_parameters.allow_text_result:
-            return 'required'
-        elif tool_choice == 'auto':
-            return None
-        elif tool_choice in ('none', 'required'):
+        """Determine the `tool_choice` setting for the model.
+        
+        If tool_choice is explicitly set in model_settings, respect that setting.
+        Otherwise, default to 'auto' to let the model decide whether to use tools.
+        """
+        if 'tool_choice' in model_settings:
+            tool_choice = model_settings['tool_choice']
+            if isinstance(tool_choice, ForcedFunctionToolChoice):
+                return {'type': 'function', 'function': {'name': tool_choice.name}}
             return tool_choice
-        elif isinstance(tool_choice, ForcedFunctionToolChoice):
-            return {'type': 'function', 'function': {'name': tool_choice.name}}
-        else:
-            assert_never(tool_choice)
+
+        return 'auto'
 
     def _get_tools(self, model_request_parameters: ModelRequestParameters) -> list[responses.FunctionToolParam]:
         tools = [self._map_tool_definition(r) for r in model_request_parameters.function_tools]
