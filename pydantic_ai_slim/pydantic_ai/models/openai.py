@@ -10,6 +10,7 @@ from typing import Literal, Union, cast, overload
 
 from openai import NotGiven
 from openai.types import Reasoning
+from openai.types.chat import ChatCompletionToolChoiceOptionParam
 from typing_extensions import assert_never
 
 from pydantic_ai.providers import Provider, infer_provider
@@ -33,7 +34,7 @@ from ..messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from ..settings import ModelSettings
+from ..settings import ForcedFunctionToolChoice, ModelSettings
 from ..tools import ToolDefinition
 from . import (
     Model,
@@ -204,14 +205,7 @@ class OpenAIModel(Model):
         model_request_parameters: ModelRequestParameters,
     ) -> chat.ChatCompletion | AsyncStream[ChatCompletionChunk]:
         tools = self._get_tools(model_request_parameters)
-
-        # standalone function to make it easier to override
-        if not tools:
-            tool_choice: Literal['none', 'required', 'auto'] | None = None
-        elif not model_request_parameters.allow_text_result:
-            tool_choice = 'required'
-        else:
-            tool_choice = 'auto'
+        tool_choice = self._map_tool_choice(model_settings, model_request_parameters, tools)
 
         openai_messages: list[chat.ChatCompletionMessageParam] = []
         for m in messages:
@@ -225,7 +219,7 @@ class OpenAIModel(Model):
                 n=1,
                 parallel_tool_calls=model_settings.get('parallel_tool_calls', NOT_GIVEN),
                 tools=tools or NOT_GIVEN,
-                tool_choice=tool_choice or NOT_GIVEN,
+                tool_choice=tool_choice,
                 stream=stream,
                 stream_options={'include_usage': True} if stream else NOT_GIVEN,
                 max_completion_tokens=model_settings.get('max_tokens', NOT_GIVEN),
@@ -403,6 +397,26 @@ class OpenAIModel(Model):
                     assert_never(item)
         return chat.ChatCompletionUserMessageParam(role='user', content=content)
 
+    @staticmethod
+    def _map_tool_choice(
+        model_settings: OpenAIModelSettings,
+        model_request_parameters: ModelRequestParameters,
+        tools: list[chat.ChatCompletionToolParam],
+    ) -> ChatCompletionToolChoiceOptionParam | None:
+        """Determine the `tool_choice` setting for the model."""
+        tool_choice = model_settings.get('tool_choice', 'auto')
+
+        if tool_choice == 'auto' and tools and not model_request_parameters.allow_text_result:
+            return 'required'
+        elif tool_choice == 'auto':
+            return 'auto'
+        elif tool_choice in ('none', 'required'):
+            return tool_choice
+        elif isinstance(tool_choice, ForcedFunctionToolChoice):
+            return {'type': 'function', 'function': {'name': tool_choice.name}}
+        else:
+            assert_never(tool_choice)
+
 
 @dataclass(init=False)
 class OpenAIResponsesModel(Model):
@@ -569,6 +583,26 @@ class OpenAIResponsesModel(Model):
             if (status_code := e.status_code) >= 400:
                 raise ModelHTTPError(status_code=status_code, model_name=self.model_name, body=e.body) from e
             raise
+
+    @staticmethod
+    def _map_tool_choice(
+        model_settings: OpenAIModelSettings,
+        model_request_parameters: ModelRequestParameters,
+        tools: list[responses.FunctionToolParam],
+    ) -> ChatCompletionToolChoiceOptionParam | None:
+        """Determine the `tool_choice` setting for the model."""
+        tool_choice = model_settings.get('tool_choice', 'auto')
+
+        if tool_choice == 'auto' and tools and not model_request_parameters.allow_text_result:
+            return 'required'
+        elif tool_choice == 'auto':
+            return None
+        elif tool_choice in ('none', 'required'):
+            return tool_choice
+        elif isinstance(tool_choice, ForcedFunctionToolChoice):
+            return {'type': 'function', 'function': {'name': tool_choice.name}}
+        else:
+            assert_never(tool_choice)
 
     def _get_tools(self, model_request_parameters: ModelRequestParameters) -> list[responses.FunctionToolParam]:
         tools = [self._map_tool_definition(r) for r in model_request_parameters.function_tools]
