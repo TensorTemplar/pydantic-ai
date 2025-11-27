@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import importlib
 import os
+import re
 import sys
 from asyncio import CancelledError
 from collections.abc import Sequence
@@ -116,6 +117,8 @@ Special prompts:
 * `/markdown` - show the last markdown output of the last question
 * `/multiline` - toggle multiline mode
 * `/cp` - copy the last response to clipboard
+* `@image <url>` - include an image URL in your prompt
+* `@video <url>` - include a video URL in your prompt
 """,
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -240,7 +243,7 @@ async def run_chat(
 
     while True:
         try:
-            auto_suggest = CustomAutoSuggest(['/markdown', '/multiline', '/exit', '/cp'])
+            auto_suggest = CustomAutoSuggest(['/markdown', '/multiline', '/exit', '/cp', '@image', '@video'])
             text = await session.prompt_async(f'{prog_name} ➤ ', auto_suggest=auto_suggest, multiline=multiline)
         except (KeyboardInterrupt, EOFError):  # pragma: no cover
             return 0
@@ -265,6 +268,32 @@ async def run_chat(
                     console.print(f'[dim]Caused by: {cause}[/dim]')
 
 
+def parse_media_references(text: str) -> tuple[str, list[Any]]:
+    """Parse @image and @video references from text.
+
+    Returns:
+        (cleaned_text, media_objects) - text with media commands removed, and list of media objects
+    """
+    from .messages import ImageUrl, VideoUrl
+
+    media_objects = []
+
+    image_pattern = r'@image\s+(\S+)'
+    for match in re.finditer(image_pattern, text):
+        url = match.group(1)
+        media_objects.append(ImageUrl(url=url))
+
+    video_pattern = r'@video\s+(\S+)'
+    for match in re.finditer(video_pattern, text):
+        url = match.group(1)
+        media_objects.append(VideoUrl(url=url))
+
+    cleaned_text = re.sub(image_pattern, '', text)
+    cleaned_text = re.sub(video_pattern, '', cleaned_text).strip()
+
+    return cleaned_text, media_objects
+
+
 async def ask_agent(
     agent: AbstractAgent[AgentDepsT, OutputDataT],
     prompt: str,
@@ -276,15 +305,26 @@ async def ask_agent(
 ) -> list[ModelMessage]:
     status = Status('[dim]Working on it…[/dim]', console=console)
 
+    text, media = parse_media_references(prompt)
+
+    message_parts: str | list[Any] = text
+    if media:
+        # If we have media, create a list with text first, then media
+        parts = []
+        if text:
+            parts.append(text)
+        parts.extend(media)
+        message_parts = parts
+
     if not stream:
         with status:
-            result = await agent.run(prompt, message_history=messages, deps=deps)
+            result = await agent.run(message_parts, message_history=messages, deps=deps)
         content = str(result.output)
         console.print(Markdown(content, code_theme=code_theme))
         return result.all_messages()
 
     with status, ExitStack() as stack:
-        async with agent.iter(prompt, message_history=messages, deps=deps) as agent_run:
+        async with agent.iter(message_parts, message_history=messages, deps=deps) as agent_run:
             live = Live('', refresh_per_second=15, console=console, vertical_overflow='ellipsis')
             async for node in agent_run:
                 if Agent.is_model_request_node(node):
