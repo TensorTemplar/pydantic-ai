@@ -2,8 +2,6 @@ from __future__ import annotations as _annotations
 
 import argparse
 import asyncio
-import importlib
-import os
 import re
 import sys
 from asyncio import CancelledError
@@ -148,7 +146,7 @@ Special prompts:
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument('prompt', nargs='?', help='AI Prompt, if omitted fall into interactive mode')
-    arg = parser.add_argument(
+    parser.add_argument(
         '-m',
         '--model',
         nargs='?',

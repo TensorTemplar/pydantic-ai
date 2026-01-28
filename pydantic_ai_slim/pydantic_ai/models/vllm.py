@@ -1,7 +1,19 @@
 from __future__ import annotations as _annotations
 
 import base64
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from openai.types import chat
+from openai.types.chat import (
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartInputAudioParam,
+    ChatCompletionContentPartParam,
+    ChatCompletionContentPartTextParam,
+    chat_completion_chunk,
+)
+from openai.types.chat.chat_completion_content_part_image_param import ImageURL
+from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
+from openai.types.chat.chat_completion_content_part_param import File, FileFile
 
 from ..messages import (
     AudioUrl,
@@ -12,25 +24,39 @@ from ..messages import (
     VideoUrl,
 )
 from . import download_item
-from .openai import OpenAIChatModel
-
-from openai.types import chat
-from openai.types.chat import (
-    ChatCompletionContentPartImageParam,
-    ChatCompletionContentPartInputAudioParam,
-    ChatCompletionContentPartParam,
-    ChatCompletionContentPartTextParam,
-)
-from openai.types.chat.chat_completion_content_part_image_param import ImageURL
-from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
-from openai.types.chat.chat_completion_content_part_param import File, FileFile
+from .openai import OpenAIChatModel, OpenAIStreamedResponse
 
 if TYPE_CHECKING:
     pass
 
 
+def _normalize_thinking_tags(content: str, thinking_tags: tuple[str, str]) -> str:
+    """Normalize content by prepending missing opening think tag.
+
+    vLLM with Qwen models may output thinking content without the opening <think> tag,
+    only including </think> at the end of the thinking section. This function detects
+    this pattern and prepends the opening tag so split_content_into_text_and_thinking works.
+    """
+    start_tag, end_tag = thinking_tags
+    if end_tag in content and start_tag not in content:
+        return start_tag + content
+    return content
+
+
 class VLLMChatModel(OpenAIChatModel):
     """A model that uses the vLLM API (OpenAI-compatible) with extended capabilities like VideoUrl."""
+
+    @property
+    def _streamed_response_cls(self) -> type[OpenAIStreamedResponse]:
+        return VLLMStreamedResponse
+
+    def _process_response(self, response: chat.ChatCompletion | str):
+        """Process non-streamed response, normalizing thinking tags before parsing."""
+        if isinstance(response, chat.ChatCompletion) and response.choices:
+            content = response.choices[0].message.content
+            if content:
+                response.choices[0].message.content = _normalize_thinking_tags(content, self.profile.thinking_tags)
+        return super()._process_response(response)
 
     async def _map_user_prompt(self, part: UserPromptPart) -> chat.ChatCompletionUserMessageParam:  # noqa: C901
         content: str | list[ChatCompletionContentPartParam]
@@ -90,7 +116,8 @@ class VLLMChatModel(OpenAIChatModel):
                         'mp3',
                     ), f'Unsupported audio format: {downloaded_item["data_type"]}'
                     audio = InputAudio(
-                        data=downloaded_item['data'], format=downloaded_item['data_type']  # type: ignore
+                        data=downloaded_item['data'],
+                        format=downloaded_item['data_type'],  # type: ignore
                     )
                     content.append(ChatCompletionContentPartInputAudioParam(input_audio=audio, type='input_audio'))
                 elif isinstance(item, DocumentUrl):
@@ -110,3 +137,28 @@ class VLLMChatModel(OpenAIChatModel):
                     pass
 
         return {'role': 'user', 'content': content}
+
+
+class VLLMStreamedResponse(OpenAIStreamedResponse):
+    """Streamed response for vLLM with thinking tag normalization.
+
+    For streaming, the first chunk may contain thinking content without the opening
+    <think> tag. This class tracks whether we've seen thinking content and injects
+    the opening tag on the first content chunk if needed.
+    """
+
+    _prepended_think_tag: bool = False
+
+    def _map_text_delta(self, choice: chat_completion_chunk.Choice):
+        content = choice.delta.content
+        if content and not self._prepended_think_tag:
+            start_tag, end_tag = self._model_profile.thinking_tags
+            if end_tag not in content and start_tag not in content:
+                pass
+            elif end_tag in content and start_tag not in content:
+                choice.delta.content = start_tag + content
+                self._prepended_think_tag = True
+            else:
+                self._prepended_think_tag = True
+
+        yield from super()._map_text_delta(choice)
